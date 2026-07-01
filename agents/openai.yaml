@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code TZ Fix"
+  short_description: "Fix Claude Code timezone signals"
+  default_prompt: "Use $claude-code-tz-fix to diagnose Claude Code timezone signals and apply level 1 or level 2 protection."
