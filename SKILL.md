@@ -1,6 +1,6 @@
 ---
 name: claude-code-tz-fix
-description: Diagnose and harden the local Claude Code startup environment against timezone and exit-IP signals. Use when the user asks to inspect Claude Code regional detection, hide Asia/Shanghai or Asia/Urumqi from Claude Code, decide what to do about ANTHROPIC_BASE_URL / a third-party relay, check whether their relay exit IP looks dirty, or set up their own clean self-hosted relay so Claude Code connects from a clean, dedicated IP.
+description: Diagnose and harden the local Claude Code startup environment against timezone and exit-IP signals. Use when the user asks to inspect Claude Code regional detection, hide Asia/Shanghai or Asia/Urumqi from Claude Code, decide what to do about ANTHROPIC_BASE_URL / a third-party relay, check whether their relay exit IP looks dirty, verify whether a third-party relay's upstream is genuinely Anthropic (not a watered-down or swapped model), or set up their own clean self-hosted relay so Claude Code connects from a clean, dedicated IP.
 ---
 
 # Claude Code TZ Fix
@@ -60,7 +60,31 @@ So the second problem is not "strip the variable." It is: **figure out whether t
 
    It reports the direct exit IP + geo, and (if a base-url is set) the relay entry IP + geo, flagging a China entry. It is honest about its limit: the relay's *exit* IP can't be measured from the client; the entry geo is only a hint — but for a self-hosted VPS relay, entry == exit, so it is accurate.
 
-3. **Apply.** Choose a timezone level, and a base-url mode if the exit needs changing:
+3. **Probe the relay's upstream** — is it really Anthropic, or watered down?
+
+   ```bash
+   bash scripts/claude-code-tz-fix.sh probe-relay              # probes ANTHROPIC_BASE_URL / wrapper-pinned relay
+   bash scripts/claude-code-tz-fix.sh probe-relay https://some-relay.example.com
+   ```
+
+   Needs `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`). It asks for the **expensive
+   models** — `claude-opus-4-8` and `claude-sonnet-4-6` — because those are what a
+   watered-down relay downgrades; **haiku is deliberately not probed** (nobody bothers
+   swapping it). With tiny `max_tokens`, per model it checks four hard-to-fake-together
+   fingerprints: official response headers (`request-id`, `anthropic-ratelimit-*`,
+   `cf-ray`), body structure (`type: message`, `id: msg_…`, `usage`), `count_tokens`
+   consistency (its token count must match the message's `usage.input_tokens`), and
+   the **downgrade check** — is the model you asked for the model you got back? Reports
+   per model: genuine Anthropic / real-Anthropic-behind-a-relay / **model swap** /
+   suspicious. An honest relay echoes the real backend model, so a downgrade shows up
+   in the model field; a relay that lies there is still caught by the other three
+   fingerprints. Override the model list with `CLAUDE_TZ_FIX_PROBE_MODELS`.
+
+   Risk: the probe exits from the **same IP** as normal use, so it adds a few normal
+   requests of exposure — the risk is that exit IP (if dirty), not the probe itself.
+   For zero added risk, switch to a clean exit first.
+
+4. **Apply.** Choose a timezone level, and a base-url mode if the exit needs changing:
 
    ```bash
    # Timezone only, leave the relay alone (safe default)
@@ -73,7 +97,7 @@ So the second problem is not "strip the variable." It is: **figure out whether t
    bash scripts/claude-code-tz-fix.sh apply level2 https://relay.example.com
    ```
 
-4. **If the exit is dirty and the user wants to fix it: guided self-hosted relay.**
+5. **If the exit is dirty and the user wants to fix it: guided self-hosted relay.**
 
    ```bash
    bash scripts/claude-code-tz-fix.sh gen-vps
@@ -88,13 +112,13 @@ So the second problem is not "strip the variable." It is: **figure out whether t
 
    The skill scaffolds and verifies; **the user provides the VPS** (renting hardware and running the command on their box is theirs to do — do not ask for or use their VPS credentials).
 
-5. **Verify:**
+6. **Verify:**
 
    ```bash
    bash scripts/claude-code-tz-fix.sh verify level2
    ```
 
-6. **Self-test** when editing the script (hermetic, no network):
+7. **Self-test** when editing the script (hermetic, no network):
 
    ```bash
    bash scripts/claude-code-tz-fix.sh self-test

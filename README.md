@@ -48,6 +48,13 @@ Check the exit IP in isolation — is the current path dirty?
 bash scripts/claude-code-tz-fix.sh check-ip
 ```
 
+Probe the relay's upstream — is it really Anthropic, or watered down?
+
+```bash
+bash scripts/claude-code-tz-fix.sh probe-relay              # probes ANTHROPIC_BASE_URL / wrapper relay
+bash scripts/claude-code-tz-fix.sh probe-relay https://some-relay.example.com
+```
+
 Apply a timezone level, plus a base-url mode if the exit needs changing:
 
 ```bash
@@ -88,6 +95,21 @@ bash scripts/claude-code-tz-fix.sh self-test
 5. Confirm: `check-ip`.
 
 The skill scaffolds and verifies; **you provide the VPS.** It never asks for or uses your VPS credentials.
+
+## Is your relay actually serving Claude? (`probe-relay`)
+
+A separate problem from a dirty exit: some third-party relays are **watered down** — they charge for Opus/Sonnet but quietly serve a cheaper or non-Anthropic model. `probe-relay` (needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`) checks for this.
+
+It asks for the **expensive models** — `claude-opus-4-8` and `claude-sonnet-4-6` — because those are the ones relays cheat on. **Haiku is deliberately not probed** (nobody bothers downgrading it, so probing it would miss the scam). With tiny `max_tokens`, per model it checks four fingerprints that are hard to fake *together*:
+
+1. **Official headers** — `request-id`, `anthropic-ratelimit-*`, `cf-ray`.
+2. **Body structure** — `type: message`, `id: msg_…`, `usage`.
+3. **`count_tokens` consistency** — the endpoint's token count must match the message's `usage.input_tokens`.
+4. **Downgrade check** — is the model you asked for the model you got back?
+
+It reports, per model: **genuine Anthropic / real-Anthropic-behind-a-relay / model swap / suspicious**. An honest relay echoes the real backend model, so a downgrade shows up in the model field; a relay that lies there is still caught by the other three fingerprints. No single check is proof — the combination is what a watered-down relay struggles to fake. Override the probed models with `CLAUDE_TZ_FIX_PROBE_MODELS`.
+
+**Risk:** the probe exits from the **same IP** as normal use, so it adds a few normal requests of exposure — the risk is that exit IP (if dirty), not the probe. For zero added risk, switch to a clean exit first.
 
 ## What it changes
 

@@ -14,6 +14,7 @@ usage() {
 Usage:
   claude-code-tz-fix.sh diagnose
   claude-code-tz-fix.sh check-ip
+  claude-code-tz-fix.sh probe-relay [base-url]
   claude-code-tz-fix.sh apply   level1|level2 [keep|strip|<https-url>]
   claude-code-tz-fix.sh verify  level1|level2
   claude-code-tz-fix.sh gen-vps
@@ -37,6 +38,18 @@ Why base-url matters (read this):
   dirty, shared exit IP. You cannot "clean" a dirty IP or hide a relay's IP;
   you can only SWAP to a clean exit. `check-ip` measures how dirty the current
   path looks; `gen-vps` scaffolds a self-hosted relay with a clean, dedicated IP.
+
+Relay authenticity (probe-relay):
+  Some third-party relays are "watered down": they charge for Opus/Sonnet but
+  quietly serve a cheaper or non-Anthropic model. `probe-relay` asks for the
+  EXPENSIVE models -- Opus 4.8 and Sonnet 4.6 (haiku is deliberately NOT probed;
+  nobody bothers downgrading it) -- with tiny max_tokens, and per model checks:
+  official response headers, response body structure, count_tokens consistency,
+  and whether the model you asked for is the model you got back (downgrade check).
+  Reports per model: genuine Anthropic / real-Anthropic-behind-a-relay / model
+  swap / suspicious. Override the model list with CLAUDE_TZ_FIX_PROBE_MODELS.
+  Risk note: the probe exits from the SAME IP as normal use, so it adds a few
+  normal requests worth of exposure -- the risk is the exit IP, not the probe.
 EOF
 }
 
@@ -502,6 +515,201 @@ VPSEOF
 }
 
 # ---------------------------------------------------------------------------
+# Relay authenticity probe: is the upstream really Anthropic?
+# ---------------------------------------------------------------------------
+
+# Pure scorer: reads three files (headers, message body, count_tokens body) for
+# ONE requested model and prints a human verdict. EXPECTED_MODEL enables the
+# downgrade check (did we get back the model we paid for?). No network ->
+# unit-testable offline.
+probe_score() {
+  HDR_FILE="$1" BODY_FILE="$2" CNT_FILE="$3" python3 -c '
+import json, os
+
+def read(p):
+    try:
+        with open(p) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+hdr = read(os.environ["HDR_FILE"]).lower()
+body_raw = read(os.environ["BODY_FILE"])
+cnt_raw = read(os.environ["CNT_FILE"])
+expected = os.environ.get("EXPECTED_MODEL", "")
+
+sig_headers = {
+    "request-id":                "request-id" in hdr,
+    "anthropic-ratelimit-*":     "anthropic-ratelimit-" in hdr,
+    "anthropic-organization-id": "anthropic-organization-id" in hdr,
+    "cloudflare (cf-ray)":       "cf-ray" in hdr,
+}
+hdr_hits = sum(1 for v in sig_headers.values() if v)
+
+body = None
+try:
+    body = json.loads(body_raw)
+except Exception:
+    pass
+
+notes = []
+model_echo = None
+in_tokens = None
+body_ok = False
+if isinstance(body, dict):
+    if body.get("type") == "error":
+        notes.append("body is an API error: " + str(body.get("error", {}).get("message", "")))
+    checks = [
+        body.get("type") == "message",
+        str(body.get("id", "")).startswith("msg_"),
+        body.get("role") == "assistant",
+        bool(body.get("model")),
+        isinstance(body.get("usage"), dict),
+    ]
+    body_ok = sum(1 for c in checks if c) >= 4
+    model_echo = body.get("model")
+    try:
+        in_tokens = body["usage"]["input_tokens"]
+    except Exception:
+        pass
+else:
+    notes.append("response body is not valid JSON")
+
+# Downgrade check: did the upstream return the model we asked for?
+model_match = None
+if expected and model_echo:
+    model_match = (model_echo == expected or str(model_echo).startswith(expected))
+
+cnt = None
+try:
+    cnt = json.loads(cnt_raw)
+except Exception:
+    pass
+cnt_tokens = cnt.get("input_tokens") if isinstance(cnt, dict) else None
+count_ok = isinstance(cnt_tokens, int)
+consistent = count_ok and isinstance(in_tokens, int) and cnt_tokens == in_tokens
+
+print("Official headers (%d/4):" % hdr_hits)
+for k, v in sig_headers.items():
+    print("   [%s] %s" % ("x" if v else " ", k))
+print("Response structure: %s" % ("looks like Anthropic" if body_ok else "does NOT match Anthropic"))
+if expected:
+    print("   requested model: %s" % expected)
+if model_echo:
+    print("   model echoed:    %s" % model_echo)
+if model_match is False:
+    print("   [!] MODEL MISMATCH -- asked for %s, got %s (downgrade / swap)" % (expected, model_echo))
+if in_tokens is not None:
+    print("   message usage.input_tokens: %s" % in_tokens)
+if count_ok:
+    print("count_tokens endpoint: present, input_tokens=%s" % cnt_tokens)
+    if in_tokens is not None:
+        print("   consistency with message usage: %s" % ("match" if consistent else "MISMATCH (different backend?)"))
+else:
+    print("count_tokens endpoint: missing / not implemented")
+for n in notes:
+    print("Note: " + n)
+
+print()
+if body_ok and model_match is False:
+    print("VERDICT: SUSPICIOUS -- MODEL SWAP: asked for %s, upstream served %s." % (expected, model_echo))
+elif body_ok and hdr_hits >= 2 and count_ok:
+    print("VERDICT: likely GENUINE Anthropic upstream (direct, or an honest reverse proxy).")
+elif body_ok and (hdr_hits >= 1 or count_ok):
+    print("VERDICT: PROBABLY real Anthropic behind a relay that strips some headers. Watch count_tokens consistency.")
+else:
+    print("VERDICT: SUSPICIOUS -- upstream may not be genuine Anthropic (watered-down / swapped model).")
+print("(An honest relay echoes the real backend model, so a downgrade shows here; a relay that")
+print(" lies in the model field can still be caught by the header / structure / count_tokens checks.)")
+'
+}
+
+# Fetch (headers, message body, count_tokens body) for one model into $1/$2/$3.
+probe_fetch_model() {
+  local base="$1" auth_header="$2" model="$3" hdr="$4" body="$5" cnt="$6"
+  curl -sS --max-time 20 -D "$hdr" -o "$body" \
+    -H "$auth_header" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -X POST "$base/v1/messages" \
+    -d "{\"model\":\"$model\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}]}" \
+    >/dev/null 2>&1 || true
+  curl -sS --max-time 20 -o "$cnt" \
+    -H "$auth_header" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -X POST "$base/v1/messages/count_tokens" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}]}" \
+    >/dev/null 2>&1 || true
+}
+
+probe_relay() {
+  local base="${1:-}"
+  [ -n "$base" ] || base="${ANTHROPIC_BASE_URL:-}"
+  if [ -z "$base" ]; then
+    local wm
+    wm="$(wrapper_base_url_mode)"
+    case "$wm" in http://*|https://*) base="$wm" ;; esac
+  fi
+  base="${base:-https://api.anthropic.com}"
+  base="${base%/}"
+
+  # Probe the EXPENSIVE models -- those are the ones relays cheat on by
+  # swapping in something cheaper. Probing haiku would miss the scam.
+  local models="${CLAUDE_TZ_FIX_PROBE_MODELS:-claude-opus-4-8,claude-sonnet-4-6}"
+
+  printf '== Relay authenticity probe ==\n'
+  printf 'Target: %s\n' "$base"
+  printf 'Models: %s (the pricey ones relays downgrade -- haiku is deliberately not probed)\n' "$models"
+  printf 'Risk: a few ordinary, harmless requests (one per model, tiny max_tokens). They exit from the\n'
+  printf '      SAME IP as your normal claude use, so the risk is that exit IP (if dirty), not the probe.\n'
+  printf '      For zero risk, switch to a clean exit first.\n\n'
+
+  # Offline injection (self-test): score one supplied triple and return.
+  if [ -n "${CLAUDE_TZ_FIX_PROBE_HEADERS_FILE:-}" ]; then
+    EXPECTED_MODEL="${CLAUDE_TZ_FIX_PROBE_EXPECTED:-claude-opus-4-8}" \
+      probe_score \
+        "${CLAUDE_TZ_FIX_PROBE_HEADERS_FILE}" \
+        "${CLAUDE_TZ_FIX_PROBE_BODY_FILE}" \
+        "${CLAUDE_TZ_FIX_PROBE_COUNT_FILE:-/dev/null}"
+    return $?
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'curl not available; cannot probe.\n' >&2
+    return 2
+  fi
+  local key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  if [ -z "$key" ]; then
+    printf 'ERROR: set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) to probe.\n' >&2
+    return 2
+  fi
+  local auth_header
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    auth_header="x-api-key: $key"
+  else
+    auth_header="authorization: Bearer $key"
+  fi
+
+  local tmp model
+  tmp="$(mktemp -d)"
+  local old_ifs="$IFS"
+  IFS=','
+  for model in $models; do
+    IFS="$old_ifs"
+    model="${model#"${model%%[![:space:]]*}"}"  # ltrim
+    printf -- '--- Probing as %s ---\n' "$model"
+    probe_fetch_model "$base" "$auth_header" "$model" \
+      "$tmp/h" "$tmp/b" "$tmp/c"
+    EXPECTED_MODEL="$model" probe_score "$tmp/h" "$tmp/b" "$tmp/c"
+    printf '\n'
+    IFS=','
+  done
+  IFS="$old_ifs"
+  rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test (hermetic; no network)
 # ---------------------------------------------------------------------------
 
@@ -548,6 +756,42 @@ EOF
   grep -q 'TZ=America/Los_Angeles' <<<"$out"
   grep -q 'BASE=https://relay.example.com' <<<"$out"
 
+  # probe-relay scorer: genuine Opus upstream (asked opus, got opus).
+  local pd="$tmp/probe"
+  mkdir -p "$pd"
+  printf 'request-id: req_123\nanthropic-ratelimit-requests-limit: 50\ncf-ray: abc123\n' > "$pd/gen-hdr.txt"
+  printf '%s' '{"type":"message","id":"msg_1","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":3}}' > "$pd/gen-body.json"
+  printf '%s' '{"input_tokens":12}' > "$pd/gen-count.json"
+  out="$(CLAUDE_TZ_FIX_PROBE_EXPECTED=claude-opus-4-8 \
+        CLAUDE_TZ_FIX_PROBE_HEADERS_FILE="$pd/gen-hdr.txt" \
+        CLAUDE_TZ_FIX_PROBE_BODY_FILE="$pd/gen-body.json" \
+        CLAUDE_TZ_FIX_PROBE_COUNT_FILE="$pd/gen-count.json" \
+        "$0" probe-relay https://relay.example.com)"
+  printf 'probe/genuine: %s\n' "$(grep VERDICT <<<"$out" || true)"
+  grep -q 'GENUINE' <<<"$out"
+
+  # probe-relay scorer: model swap (asked opus, got haiku -- honest-but-downgrading relay).
+  printf '%s' '{"type":"message","id":"msg_2","role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":3}}' > "$pd/swap-body.json"
+  out="$(CLAUDE_TZ_FIX_PROBE_EXPECTED=claude-opus-4-8 \
+        CLAUDE_TZ_FIX_PROBE_HEADERS_FILE="$pd/gen-hdr.txt" \
+        CLAUDE_TZ_FIX_PROBE_BODY_FILE="$pd/swap-body.json" \
+        CLAUDE_TZ_FIX_PROBE_COUNT_FILE="$pd/gen-count.json" \
+        "$0" probe-relay https://relay.example.com)"
+  printf 'probe/swap:    %s\n' "$(grep VERDICT <<<"$out" || true)"
+  grep -q 'MODEL SWAP' <<<"$out"
+
+  # probe-relay scorer: watered-down upstream (OpenAI-shaped body, no fingerprints).
+  printf 'content-type: application/json\n' > "$pd/bad-hdr.txt"
+  printf '%s' '{"choices":[{"message":{"content":"pong"}}]}' > "$pd/bad-body.json"
+  : > "$pd/bad-count.json"
+  out="$(CLAUDE_TZ_FIX_PROBE_EXPECTED=claude-opus-4-8 \
+        CLAUDE_TZ_FIX_PROBE_HEADERS_FILE="$pd/bad-hdr.txt" \
+        CLAUDE_TZ_FIX_PROBE_BODY_FILE="$pd/bad-body.json" \
+        CLAUDE_TZ_FIX_PROBE_COUNT_FILE="$pd/bad-count.json" \
+        "$0" probe-relay https://relay.example.com)"
+  printf 'probe/watered: %s\n' "$(grep VERDICT <<<"$out" || true)"
+  grep -q 'SUSPICIOUS' <<<"$out"
+
   printf 'Self-test passed.\n'
 }
 
@@ -555,6 +799,7 @@ cmd="${1:-}"
 case "$cmd" in
   diagnose|"") diagnose ;;
   check-ip) check_ip ;;
+  probe-relay) probe_relay "${2:-}" ;;
   apply)
     apply_level "${2:-}" "${3:-}"
     ;;
