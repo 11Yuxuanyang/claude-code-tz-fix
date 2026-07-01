@@ -99,6 +99,15 @@ So the second problem is not "strip the variable." It is: **figure out whether t
 
 5. **If the exit is dirty and the user wants to fix it: guided self-hosted relay.**
 
+   > **Prerequisite — this path only works with an OFFICIAL Anthropic key.** The VPS
+   > reverse-proxies to `api.anthropic.com` and passes the user's key through. That key
+   > must be an official Anthropic key (from `console.anthropic.com` or an official
+   > subscription). **If the user only has a key from a third-party relay, the VPS cannot
+   > help** — that key isn't valid at `api.anthropic.com`, and proxying back through the
+   > relay just makes the dirty relay the last hop again. In that case what they're missing
+   > is official *access*, not a clean IP: they must get an official key first (or switch to
+   > a clean relay). Always establish which kind of key the user has before recommending a VPS.
+
    ```bash
    bash scripts/claude-code-tz-fix.sh gen-vps
    ```
@@ -138,6 +147,7 @@ Timestamped backups are created before edits. `~/.npm-global/bin/claude` and `/o
 - **Timezone**: Level 1 for minimal side effects; Level 2 for the harder stance (accepts US-date side effects).
 - **Base-url**: default to `keep`. Only `strip` when `check-ip` shows the user has a clean direct route. Only pin a `<url>` when it is the user's **own** clean relay.
 - Never claim you can hide a relay's IP or clean a dirty IP. The honest options are: use a clean direct route, or stand up a clean self-hosted exit.
+- **The self-hosted VPS relay presupposes an official Anthropic key.** It reverse-proxies `api.anthropic.com` and passes the user's key through, so it only helps someone who already has official access. If the user only has a third-party relay's key, the VPS is a dead end — proxying to the official endpoint rejects their key, and proxying back through the relay restores the dirty last hop. Their real gap is official access, not a clean IP; point them to `console.anthropic.com` for an official key (or a clean relay), not to a VPS. Ask which kind of key they have before recommending `gen-vps`.
 - **Consistency matters more than a clean exit alone.** A clean US exit for `claude` paired with a China login IP on `anthropic.com` is itself a signal. Advise aligning the exit region with the login region (and the timezone already set).
 - If an unmanaged `claude()` already exists, leave it intact; the managed block is appended later so zsh resolves to it.
 - This only handles local Claude Code startup signals. Login IP, billing region, account history, browser/device signals, and server-side risk systems are separate and out of scope.

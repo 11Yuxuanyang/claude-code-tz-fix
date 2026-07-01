@@ -86,6 +86,8 @@ bash scripts/claude-code-tz-fix.sh self-test
 
 ## Guided flow to swap a dirty exit for a clean one
 
+> ⚠️ **This only works if you have an OFFICIAL Anthropic key** (from [console.anthropic.com](https://console.anthropic.com) or an official subscription). The VPS reverse-proxies `api.anthropic.com` and passes *your* key through. **If all you have is a key from a third-party relay, the VPS is a dead end:** that key isn't valid at the official endpoint, and proxying back through the relay just makes the dirty relay the last hop again. In that case your real gap is *official access*, not a clean IP — get an official key first (or switch to a clean relay). The VPS solves a dirty IP; it can't manufacture official access you don't have.
+
 `gen-vps` writes `claude-relay-vps-setup.sh` (a Caddy reverse proxy to `api.anthropic.com`) and prints the steps:
 
 1. Rent a VPS with a clean, dedicated IP (US/JP/SG; avoid blacklisted datacenter ranges).

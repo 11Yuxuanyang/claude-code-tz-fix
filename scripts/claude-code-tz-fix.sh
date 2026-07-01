@@ -504,6 +504,13 @@ echo "  bash claude-code-tz-fix.sh apply level2 https://${DOMAIN}"
 VPSEOF
   chmod +x "$out"
   printf 'Wrote VPS relay setup script: %s\n\n' "$out"
+  printf 'PREREQUISITE -- this only works if you have an OFFICIAL Anthropic key.\n'
+  printf '  The VPS reverse-proxies to api.anthropic.com and passes YOUR key through. That key\n'
+  printf '  must be an official Anthropic key (console.anthropic.com or an official subscription).\n'
+  printf '  If all you have is a key from a third-party relay, the VPS canNOT help: your key is not\n'
+  printf '  valid at api.anthropic.com, and proxying back through the relay makes the dirty relay the\n'
+  printf '  last hop again. What you are missing then is official ACCESS, not a clean IP -- get an\n'
+  printf '  official key first, then this VPS reverse-proxies the official endpoint from a clean IP.\n\n'
   printf 'Guided flow to swap a dirty exit for a clean one:\n'
   printf '  1) Rent a VPS with a clean, dedicated IP (US/JP/SG; avoid blacklisted datacenter ranges).\n'
   printf '  2) Point an A record (your.domain.com) at the VPS IP.\n'
