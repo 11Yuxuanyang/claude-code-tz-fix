@@ -1,4 +1,4 @@
 interface:
   display_name: "Claude Code TZ Fix"
-  short_description: "Fix Claude Code timezone signals"
-  default_prompt: "Use $claude-code-tz-fix to diagnose Claude Code timezone signals and apply level 1 or level 2 protection."
+  short_description: "Harden Claude Code timezone and exit-IP signals"
+  default_prompt: "Use $claude-code-tz-fix to diagnose Claude Code timezone and exit-IP signals: run diagnose and check-ip, then pick a timezone level (1 or 2) and a base-url mode (keep/strip/self-hosted relay). If the exit IP looks dirty, use gen-vps to scaffold a clean self-hosted relay."
