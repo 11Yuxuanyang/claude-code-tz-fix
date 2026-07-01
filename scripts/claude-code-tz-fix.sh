@@ -111,7 +111,8 @@ has_dangerous_default() {
 # ---------------------------------------------------------------------------
 
 url_host() {
-  printf '%s\n' "$1" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#@.*$##; s#:[0-9]+$##'
+  # strip scheme -> strip path -> strip userinfo (up to the LAST @) -> strip port
+  printf '%s\n' "$1" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#.*@##; s#:[0-9]+$##'
 }
 
 resolve_host() {
@@ -396,7 +397,9 @@ apply_level() {
     return 2
   }
 
-  diagnose
+  # Skip the network IP check here -- apply just writes the wrapper; the exit-IP
+  # and relay checks are separate commands (check-ip / probe-relay), pointed to below.
+  CLAUDE_TZ_FIX_SKIP_IP_CHECK=1 diagnose
   real_bin="$(find_real_claude)"
   if has_dangerous_default; then
     dangerous_default="1"
@@ -631,20 +634,20 @@ print(" lies in the model field can still be caught by the header / structure / 
 '
 }
 
-# Fetch (headers, message body, count_tokens body) for one model into $1/$2/$3.
+# Fetch (headers, message body, count_tokens body) for one model.
+# Args: base auth_header extra_header model hdr_out body_out cnt_out
 probe_fetch_model() {
-  local base="$1" auth_header="$2" model="$3" hdr="$4" body="$5" cnt="$6"
-  curl -sS --max-time 20 -D "$hdr" -o "$body" \
-    -H "$auth_header" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
+  local base="$1" auth_header="$2" extra_header="$3" model="$4" hdr="$5" body="$6" cnt="$7"
+  # Truncate outputs FIRST: curl leaves the file untouched on a failed request,
+  # so without this one model's response would bleed into the next model's read.
+  : > "$hdr"; : > "$body"; : > "$cnt"
+  local -a H=(-H "$auth_header" -H "anthropic-version: 2023-06-01" -H "content-type: application/json")
+  if [ -n "$extra_header" ]; then H+=(-H "$extra_header"); fi
+  curl -sS --max-time 20 -D "$hdr" -o "$body" "${H[@]}" \
     -X POST "$base/v1/messages" \
     -d "{\"model\":\"$model\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}]}" \
     >/dev/null 2>&1 || true
-  curl -sS --max-time 20 -o "$cnt" \
-    -H "$auth_header" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
+  curl -sS --max-time 20 -o "$cnt" "${H[@]}" \
     -X POST "$base/v1/messages/count_tokens" \
     -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}]}" \
     >/dev/null 2>&1 || true
@@ -691,11 +694,13 @@ probe_relay() {
     printf 'ERROR: set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) to probe.\n' >&2
     return 2
   fi
-  local auth_header
+  local auth_header extra_header=""
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     auth_header="x-api-key: $key"
   else
+    # OAuth / subscription tokens need the Bearer scheme plus the oauth beta header.
     auth_header="authorization: Bearer $key"
+    extra_header="anthropic-beta: oauth-2025-04-20"
   fi
 
   local tmp model
@@ -706,7 +711,7 @@ probe_relay() {
     IFS="$old_ifs"
     model="${model#"${model%%[![:space:]]*}"}"  # ltrim
     printf -- '--- Probing as %s ---\n' "$model"
-    probe_fetch_model "$base" "$auth_header" "$model" \
+    probe_fetch_model "$base" "$auth_header" "$extra_header" "$model" \
       "$tmp/h" "$tmp/b" "$tmp/c"
     EXPECTED_MODEL="$model" probe_score "$tmp/h" "$tmp/b" "$tmp/c"
     printf '\n'
